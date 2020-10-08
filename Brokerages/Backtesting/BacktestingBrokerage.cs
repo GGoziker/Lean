@@ -430,7 +430,7 @@ namespace QuantConnect.Brokerages.Backtesting
                             OnOrderEvent(fill);
                         }
 
-                        if (order.Type == OrderType.OptionExercise)
+                        if (fill.IsAssignment)
                         {
                             fill.Message = order.Tag;
                             OnOptionPositionAssigned(fill);
@@ -517,8 +517,7 @@ namespace QuantConnect.Brokerages.Backtesting
         /// <returns></returns>
         private void SetPendingOrder(Order order)
         {
-            // only save off clones!
-            _pending[order.Id] = order.Clone();
+            _pending[order.Id] = order;
         }
     }
 }

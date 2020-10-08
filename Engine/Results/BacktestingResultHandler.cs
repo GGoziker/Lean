@@ -26,7 +26,6 @@ using QuantConnect.Orders;
 using QuantConnect.Packets;
 using QuantConnect.Statistics;
 using QuantConnect.Util;
-using System.IO;
 using QuantConnect.Lean.Engine.Alphas;
 
 namespace QuantConnect.Lean.Engine.Results
@@ -36,9 +35,6 @@ namespace QuantConnect.Lean.Engine.Results
     /// </summary>
     public class BacktestingResultHandler : BaseResultsHandler, IResultHandler
     {
-        // used for resetting out/error upon completion
-        private static readonly TextWriter StandardOut = Console.Out;
-        private static readonly TextWriter StandardError = Console.Error;
         private const double Samples = 4000;
         private const double MinimumSamplePeriod = 4;
 
@@ -134,10 +130,6 @@ namespace QuantConnect.Lean.Engine.Results
             }
 
             Log.Trace("BacktestingResultHandler.Run(): Ending Thread...");
-
-            // reset standard out/error
-            Console.SetOut(StandardOut);
-            Console.SetError(StandardError);
         } // End Run();
 
         /// <summary>
@@ -320,7 +312,7 @@ namespace QuantConnect.Lean.Engine.Results
                     SaveResults(key, results);
 
                     // Store Order Events in a separate file
-                    StoreOrderEvents(Algorithm.UtcTime, result.Results.OrderEvents);
+                    StoreOrderEvents(Algorithm?.UtcTime ?? DateTime.UtcNow, result.Results.OrderEvents);
                 }
                 else
                 {
@@ -340,30 +332,37 @@ namespace QuantConnect.Lean.Engine.Results
         {
             try
             {
-                //Convert local dictionary:
-                var charts = new Dictionary<string, Chart>(Charts);
-                var orders = new Dictionary<int, Order>(TransactionHandler.Orders);
-                var profitLoss = new SortedDictionary<DateTime, decimal>(Algorithm.Transactions.TransactionRecord);
-                var statisticsResults = GenerateStatisticsResults(charts, profitLoss);
-                var runtime = GetAlgorithmRuntimeStatistics(statisticsResults.Summary);
-
-                FinalStatistics = statisticsResults.Summary;
-
-                // clear the trades collection before placing inside the backtest result
-                foreach (var ap in statisticsResults.RollingPerformances.Values)
+                BacktestResultPacket result;
+                // could happen if algorithm failed to init
+                if (Algorithm != null)
                 {
-                    ap.ClosedTrades.Clear();
+                    //Convert local dictionary:
+                    var charts = new Dictionary<string, Chart>(Charts);
+                    var orders = new Dictionary<int, Order>(TransactionHandler.Orders);
+                    var profitLoss = new SortedDictionary<DateTime, decimal>(Algorithm.Transactions.TransactionRecord);
+                    var statisticsResults = GenerateStatisticsResults(charts, profitLoss);
+                    var runtime = GetAlgorithmRuntimeStatistics(statisticsResults.Summary);
+
+                    FinalStatistics = statisticsResults.Summary;
+
+                    // clear the trades collection before placing inside the backtest result
+                    foreach (var ap in statisticsResults.RollingPerformances.Values)
+                    {
+                        ap.ClosedTrades.Clear();
+                    }
+                    var orderEvents = TransactionHandler.OrderEvents.ToList();
+                    //Create a result packet to send to the browser.
+                    result = new BacktestResultPacket(_job,
+                        new BacktestResult(new BacktestResultParameters(charts, orders, profitLoss, statisticsResults.Summary, runtime, statisticsResults.RollingPerformances, orderEvents, statisticsResults.TotalPerformance, AlphaRuntimeStatistics)),
+                        Algorithm.EndDate, Algorithm.StartDate);
                 }
-                var orderEvents = TransactionHandler.OrderEvents.ToList();
-                //Create a result packet to send to the browser.
-                var result = new BacktestResultPacket(_job,
-                    new BacktestResult(new BacktestResultParameters(charts, orders, profitLoss, statisticsResults.Summary, runtime, statisticsResults.RollingPerformances, orderEvents, statisticsResults.TotalPerformance, AlphaRuntimeStatistics)),
-                    Algorithm.EndDate, Algorithm.StartDate)
+                else
                 {
-                    ProcessingTime = (DateTime.UtcNow - StartTime).TotalSeconds,
-                    DateFinished = DateTime.Now,
-                    Progress = 1
-                };
+                    result = BacktestResultPacket.CreateEmpty(_job);
+                }
+                result.ProcessingTime = (DateTime.UtcNow - StartTime).TotalSeconds;
+                result.DateFinished = DateTime.Now;
+                result.Progress = 1;
 
                 //Place result into storage.
                 StoreResult(result);
@@ -630,7 +629,7 @@ namespace QuantConnect.Lean.Engine.Results
         /// <summary>
         /// Terminate the result thread and apply any required exit procedures like sending final results.
         /// </summary>
-        public virtual void Exit()
+        public override void Exit()
         {
             // Only process the logs once
             if (!ExitTriggered)
@@ -652,6 +651,8 @@ namespace QuantConnect.Lean.Engine.Results
                 StopUpdateRunner();
 
                 SendFinalResult();
+
+                base.Exit();
             }
         }
 
@@ -691,7 +692,7 @@ namespace QuantConnect.Lean.Engine.Results
 
             var time = Algorithm.UtcTime;
 
-            if (time > _nextSample || forceProcess)
+            if (ShouldSampleCharts(time) && time > _nextSample || forceProcess)
             {
                 //Set next sample time: 4000 samples per backtest
                 _nextSample = time.Add(ResamplePeriod);
